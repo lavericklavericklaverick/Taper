@@ -13,22 +13,20 @@
 1. Edit the tracked file in `Orientor/inference/`; do not paste a merge-conflict result into the live page.
 2. Search `index.html` for `<<<<<<<`, `=======`, and `>>>>>>>`. None may remain: conflict markers can appear as page text and invalidate the JavaScript.
 3. Check that the inline JavaScript parses and run `git diff --check`.
-4. After deployment, confirm the live page shows the expected version, model-ready status, and camera preview before testing BLE or Auto Align.
+4. After deployment, confirm the live page shows the expected version, model-ready status, and camera preview before testing orientation checks or BLE.
 
-## Startup and alignment
+## Startup and orientation check
 
 1. Open the live page over HTTPS.
 2. Wait for the model status to say it is ready.
-3. Start the camera and connect to `ESP32C6_Stepper`.
-4. Test one motor step before starting Auto Align.
-5. During alignment, read the status below the model progress bar: it reports camera/model inference, the predicted orientation and confidence, each step, and any missing prerequisite or error.
+3. Start the camera.
+4. Tap **Check Orientation**. The status below the model progress bar reports whether the model thinks the webbing is UP or DOWN, its confidence, and the raw score. Tap again to check another frame.
+5. Orientation checks do not connect to BLE or move the motor. Connect to `ESP32C6_Stepper` only if you want to use **Test Step ('R')**.
 
-Auto Align steps only for a confident DOWN prediction (`raw <= 0.30`) and stops for a confident UP prediction (`raw >= 0.70`). Predictions between those thresholds are reported but do not move the motor.
-
-## Diagnosing Auto Align
+## Diagnosing orientation checks
 
 - Confirm the page shows the version in `index.html`; the browser tab may still have an older deployment cached.
-- The on-screen console keeps the latest 80 messages so repeated predictions cannot grow the page indefinitely.
-- Each alignment frame logs the camera dimensions, crop time, TFLite predict start and duration, and prediction/confidence.
-- If the page stops responding, note the last visible frame message. A last message saying `calling TFLite predict` points to the synchronous model prediction; later messages narrow it to output reading or motor communication.
+- The on-screen status reports the latest orientation result or an error; the debug console keeps the latest 80 messages.
+- The model labels scores at or above `0.5` as UP and scores below `0.5` as DOWN. Confidence is the score for the predicted class.
+- Orientation checks require only a ready model and an active camera; BLE is needed only for the separate manual motor-step test.
 - After changing the page, repeat the pre-publish checks and wait for GitHub Pages deployment before testing.

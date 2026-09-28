@@ -71,7 +71,7 @@
 <body>
 
   <h3>Webbing Auto-Aligner</h3>
-  <p class="version">Version 2026.09.29.1</p>
+  <p class="version">Version 2026.09.29.2</p>
 
   <!-- Camera Live Viewfinder -->
   <div class="viewfinder">
@@ -90,7 +90,7 @@
     <button id="btnRetryModel" hidden>Retry model download</button>
   </div>
   <div id="alignmentStatus" class="alignment-status" role="status" aria-live="polite">
-    Start camera, connect BLE, and tap Auto Align.
+    Start the camera, then tap Check Orientation.
   </div>
 
   <div class="row">
@@ -99,7 +99,7 @@
   </div>
   <div class="row">
     <button id="btnStep" class="manual" disabled>Test Step ('R')</button>
-    <button id="btnAlign" disabled>Auto Align</button>
+    <button id="btnAlign" disabled>Check Orientation</button>
   </div>
 
   <!-- On-Screen Debug Console -->
@@ -125,12 +125,10 @@
 
     let rxChar = null;
     let tfliteModel = null;
-    let isRunning = false;
+    let isCheckingOrientation = false;
     let waitingForAck = false;
     let ackTimeoutId = null;
     let modelLoadPromise = null;
-    let alignmentRunId = 0;
-    let alignmentFrame = 0;
 
     const video = document.getElementById('webcam');
     const cropCanvas = document.getElementById('cropCanvas');
@@ -146,6 +144,10 @@
 
     function setAlignmentStatus(message) {
       alignmentStatus.textContent = message;
+    }
+
+    function updateOrientationButton() {
+      btnAlign.disabled = isCheckingOrientation || !tfliteModel || video.videoWidth === 0;
     }
 
     function updateModelStatus(message, progress = null) {
@@ -182,12 +184,14 @@
         log("Camera active.");
         btnStartCam.disabled = true;
         btnConnect.disabled = false;
+        updateOrientationButton();
 
       } catch (err) {
         setAlignmentStatus(`Camera failed: ${err.message}`);
         log(`Camera failed: ${err.message}`, "err");
       }
     };
+    video.addEventListener("loadedmetadata", updateOrientationButton);
 
     // 2. Load TFLite Model
     async function loadModel() {
@@ -247,7 +251,7 @@
           updateModelStatus("Model ready. Start the camera and connect BLE to align.", 100);
           log("<span style='color:#00ff88'>TFLite Model ready!</span>");
 
-          if (rxChar) btnAlign.disabled = false;
+          updateOrientationButton();
         } catch (err) {
           updateModelStatus(`Model load failed: ${err.message}`);
           btnRetryModel.hidden = false;
@@ -280,16 +284,13 @@
           if (ackTimeoutId !== null) clearTimeout(ackTimeoutId);
           ackTimeoutId = null;
           waitingForAck = false;
-          setAlignmentStatus(isRunning
-            ? "Stepper finished. Checking the webbing again..."
-            : "Test step finished.");
+          setAlignmentStatus("Test step finished.");
           log("ESP32 Ack: Step completed.");
         });
 
         log("<span style='color:#00ff88'>BLE Connected!</span>");
         btnConnect.disabled = true;
         btnStep.disabled = false;
-        if (tfliteModel) btnAlign.disabled = false;
       } catch (err) {
         setAlignmentStatus(`BLE connection failed: ${err.message}`);
         log(`BLE failed: ${err.message}`, "err");
@@ -301,15 +302,6 @@
       log("Test Step requested.");
       await sendStep();
     };
-
-    function stopAlignment(message) {
-      isRunning = false;
-      alignmentRunId++;
-      btnAlign.innerText = "Auto Align";
-      btnAlign.classList.remove("stop");
-      setAlignmentStatus(message);
-      log(message);
-    }
 
     async function sendStep() {
       if (!rxChar) {
@@ -337,11 +329,7 @@
           if (waitingForAck) {
             waitingForAck = false;
             ackTimeoutId = null;
-            if (isRunning) {
-              stopAlignment("Stopped: no step-complete acknowledgement. Check the ESP32 and motor driver.");
-            } else {
-              setAlignmentStatus("No step-complete acknowledgement. Check the ESP32 and motor driver.");
-            }
+            setAlignmentStatus("No step-complete acknowledgement. Check the ESP32 and motor driver.");
             log("No step-complete acknowledgement received. Check the ESP32 firmware and motor driver.", "err");
           }
         }, 5000);
@@ -357,84 +345,46 @@
       }
     }
 
-    // 5. Alignment Loop
-    btnAlign.onclick = () => {
-      if (isRunning) {
-        stopAlignment("Alignment stopped.");
-      } else {
+    // 5. Report one orientation prediction without moving the motor.
+    btnAlign.onclick = async () => {
+      if (isCheckingOrientation) return;
+      if (video.videoWidth === 0 || !tfliteModel) {
         const missing = [];
         if (video.videoWidth === 0) missing.push("camera");
         if (!tfliteModel) missing.push("model");
-        if (!rxChar) missing.push("BLE");
-        if (missing.length > 0) {
-          const message = `Auto Align needs ${missing.join(", ")} ready.`;
-          setAlignmentStatus(message);
-          log(message, "err");
-          return;
-        }
-        isRunning = true;
-        const runId = ++alignmentRunId;
-        alignmentFrame = 0;
-        btnAlign.innerText = "Stop";
-        btnAlign.classList.add("stop");
-        log(`Starting alignment run #${runId}. Camera: ${video.videoWidth}x${video.videoHeight}; model and BLE ready.`);
-        setAlignmentStatus("Auto Align started. Capturing a frame...");
-        runLoop(runId);
-      }
-    };
-
-    async function runLoop(runId) {
-      if (!isRunning || runId !== alignmentRunId) return;
-
-      if (waitingForAck) {
-        setTimeout(() => runLoop(runId), 250);
+        setAlignmentStatus(`Check Orientation needs ${missing.join(" and ")} ready.`);
         return;
       }
 
-      if (video.videoWidth === 0 || video.videoHeight === 0) {
-        setAlignmentStatus("Auto Align is waiting for a live camera frame...");
-        log(`Run #${runId}: camera has no frame dimensions yet.`, "warn");
-        setTimeout(() => runLoop(runId), 250);
-        return;
-      }
-
-      const frameNumber = ++alignmentFrame;
-      const frameStartedAt = performance.now();
+      isCheckingOrientation = true;
+      updateOrientationButton();
       let inputTensor;
       let output;
       try {
-        log(`Run #${runId}, frame ${frameNumber}: reading ${video.videoWidth}x${video.videoHeight} camera frame.`);
-        setAlignmentStatus("Reading camera frame and running the model...");
-        // A. Center-crop video square to 224x224
+        log(`Checking orientation from ${video.videoWidth}x${video.videoHeight} camera frame.`);
+        setAlignmentStatus("Reading camera frame...");
         const minDim = Math.min(video.videoWidth, video.videoHeight);
         const sx = (video.videoWidth - minDim) / 2;
         const sy = (video.videoHeight - minDim) / 2;
         cropCtx.drawImage(video, sx, sy, minDim, minDim, 0, 0, 224, 224);
 
-        // B. Extract raw RGBA and pack RGB directly into Float32Array (0.0 to 255.0)
         const imgData = cropCtx.getImageData(0, 0, 224, 224).data;
         const float32Values = new Float32Array(1 * 224 * 224 * 3);
         let ptr = 0;
         for (let i = 0; i < imgData.length; i += 4) {
-          float32Values[ptr++] = imgData[i];     // Red
-          float32Values[ptr++] = imgData[i + 1]; // Green
-          float32Values[ptr++] = imgData[i + 2]; // Blue
+          float32Values[ptr++] = imgData[i];
+          float32Values[ptr++] = imgData[i + 1];
+          float32Values[ptr++] = imgData[i + 2];
         }
-        log(`Run #${runId}, frame ${frameNumber}: crop ready in ${(performance.now() - frameStartedAt).toFixed(0)} ms.`);
-
-        // C. Build tensor directly (no .toFloat() or prototype chaining needed)
         inputTensor = tf.tensor(float32Values, [1, 224, 224, 3], 'float32');
 
-        // Yield once so the "predicting" diagnostic is painted before synchronous inference.
-        setAlignmentStatus(`Frame ${frameNumber}: running model inference...`);
-        log(`Run #${runId}, frame ${frameNumber}: calling TFLite predict.`);
-        await new Promise(resolve => requestAnimationFrame(() => resolve()));
-        if (!isRunning || runId !== alignmentRunId) return;
+        setAlignmentStatus("Running orientation check...");
+        log("Running TFLite orientation prediction.");
+        await new Promise(resolve => requestAnimationFrame(resolve));
         const predictionStartedAt = performance.now();
         output = tfliteModel.predict(inputTensor);
-        log(`Run #${runId}, frame ${frameNumber}: TFLite predict returned in ${(performance.now() - predictionStartedAt).toFixed(0)} ms.`);
+        log(`TFLite prediction returned in ${(performance.now() - predictionStartedAt).toFixed(0)} ms.`);
 
-        // Handle single Tensor or NamedTensorMap
         let outTensor = output;
         if (!(output instanceof tf.Tensor)) {
           const firstKey = Object.keys(output)[0];
@@ -446,37 +396,20 @@
         }
 
         const rawData = await outTensor.data();
-        if (!isRunning || runId !== alignmentRunId) return;
         const raw = rawData[0];
         if (!Number.isFinite(raw) || raw < 0 || raw > 1) {
           throw new Error(`Model returned invalid confidence: ${raw}`);
         }
 
-        // E. Process prediction matching Python threshold
         const isUp = raw >= 0.5;
         const conf = ((isUp ? raw : (1.0 - raw)) * 100).toFixed(1);
-        log(`Run #${runId}, frame ${frameNumber}: detected <b>${isUp ? 'UP' : 'DOWN'}</b> (${conf}%) [raw: ${raw.toFixed(3)}], total ${(performance.now() - frameStartedAt).toFixed(0)} ms.`);
-
-        if (isUp && raw >= 0.70) {
-          stopAlignment(`ALIGNED — model detects UP (${conf}%).`);
-          return;
-        } else if (!isUp && raw <= 0.30) {
-          // Step only when the model confidently identifies DOWN.
-          setAlignmentStatus(`Detected DOWN (${conf}%). Sending a step...`);
-          const sent = await sendStep();
-          if (!sent) {
-            stopAlignment("Alignment stopped because the step command failed.");
-            return;
-          }
-        } else {
-          setAlignmentStatus(`Detected ${isUp ? 'UP' : 'DOWN'} (${conf}%), but not confidently enough to move. Rechecking...`);
-          log("Uncertain orientation. Waiting for a clearer reading.", "warn");
-        }
+        const orientation = isUp ? "UP" : "DOWN";
+        const message = `Model thinks webbing is ${orientation} (${conf}% confidence; raw score: ${raw.toFixed(3)}).`;
+        setAlignmentStatus(message);
+        log(message);
       } catch (err) {
-        if (isRunning && runId === alignmentRunId) {
-          setAlignmentStatus(`Inference failed: ${err.message}`);
-          log(`Run #${runId}, frame ${frameNumber} failed: ${err.name}: ${err.message}`, "err");
-        }
+        setAlignmentStatus(`Orientation check failed: ${err.message}`);
+        log(`Orientation check failed: ${err.name}: ${err.message}`, "err");
       } finally {
         if (inputTensor) inputTensor.dispose();
         if (output instanceof tf.Tensor) {
@@ -486,12 +419,10 @@
             if (tensor && typeof tensor.dispose === 'function') tensor.dispose();
           }
         }
+        isCheckingOrientation = false;
+        updateOrientationButton();
       }
-
-      if (isRunning && runId === alignmentRunId) {
-        setTimeout(() => runLoop(runId), 250);
-      }
-    }
+    };
 
     preFlightCheck();
     loadModel();
