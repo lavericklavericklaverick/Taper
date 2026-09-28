@@ -15,7 +15,7 @@
 3. Check that the inline JavaScript parses and run `git diff --check`.
 4. After deployment, confirm the live page shows the expected version, model-ready status, and camera preview before testing orientation checks or BLE.
 
-## Startup and orientation check
+## Startup and orientation check.
 
 1. Open the live page over HTTPS.
 2. Wait for the model status to say it is ready.
