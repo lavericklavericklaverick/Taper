@@ -57,7 +57,7 @@
 <body>
 
   <h3>Webbing Auto-Aligner</h3>
-  <p class="version">Version 2026.09.28.1</p>
+  <p class="version">Version 2026.09.28.2</p>
 
   <!-- Camera Live Viewfinder -->
   <div class="viewfinder">
@@ -100,6 +100,7 @@
     let tfliteModel = null;
     let isRunning = false;
     let waitingForAck = false;
+    let ackTimeoutId = null;
 
     const video = document.getElementById('webcam');
     const cropCanvas = document.getElementById('cropCanvas');
@@ -175,6 +176,8 @@
 
         await txChar.startNotifications();
         txChar.addEventListener('characteristicvaluechanged', () => {
+          if (ackTimeoutId !== null) clearTimeout(ackTimeoutId);
+          ackTimeoutId = null;
           waitingForAck = false;
           log("ESP32 Ack: Step completed.");
         });
@@ -190,17 +193,38 @@
 
     // 4. Send Step Command
     btnStep.onclick = async () => {
+      log("Test Step requested.");
       await sendStep();
     };
 
     async function sendStep() {
-      if (!rxChar) return;
+      if (!rxChar) {
+        log("Step unavailable: connect to BLE first.", "err");
+        return;
+      }
+      if (waitingForAck) {
+        log("Step unavailable: waiting for the previous step to finish.", "warn");
+        return;
+      }
       try {
         waitingForAck = true;
         const enc = new TextEncoder();
-        await rxChar.writeValue(enc.encode("R"));
-        log("Sent: 'R' (Step)");
+        const command = enc.encode("R");
+        if (typeof rxChar.writeValueWithResponse === 'function') {
+          await rxChar.writeValueWithResponse(command);
+        } else {
+          await rxChar.writeValue(command);
+        }
+        log("Step command sent. Waiting for ESP32 to finish...");
+        ackTimeoutId = setTimeout(() => {
+          if (waitingForAck) {
+            waitingForAck = false;
+            log("No step-complete acknowledgement received. Check the ESP32 firmware and motor driver.", "err");
+          }
+        }, 5000);
       } catch (err) {
+        if (ackTimeoutId !== null) clearTimeout(ackTimeoutId);
+        ackTimeoutId = null;
         waitingForAck = false;
         log(`Step failed: ${err.message}`, "err");
       }
@@ -214,10 +238,15 @@
         btnAlign.classList.remove("stop");
         log("Alignment stopped.");
       } else {
+        if (!rxChar || !tfliteModel || video.videoWidth === 0) {
+          log("Auto Align unavailable: start the camera and wait for the model to load, then connect BLE.", "err");
+          return;
+        }
         isRunning = true;
         btnAlign.innerText = "Stop";
         btnAlign.classList.add("stop");
         log("Starting alignment loop...");
+        log("Capturing a frame for the first orientation reading...");
         runLoop();
       }
     };
@@ -280,14 +309,6 @@
           } else if (!isUp && raw <= 0.30) {
             // Step only when the model confidently identifies DOWN.
             await sendStep();
-
-            // Safety timeout in case a BLE notification is dropped
-            setTimeout(() => {
-              if (waitingForAck) {
-                log("Ack timeout fallback. Continuing...", "warn");
-                waitingForAck = false;
-              }
-            }, 1500);
           } else {
             log("Uncertain orientation. Waiting for a clearer reading.", "warn");
           }
