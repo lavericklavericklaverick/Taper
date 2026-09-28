@@ -17,6 +17,7 @@
       display: flex; flex-direction: column; align-items: center;
     }
     h3 { margin: 8px 0; color: #4da3ff; }
+    .version { margin: 0 0 8px; font-size: 12px; color: #888; }
     .viewfinder {
       position: relative; width: 100%; max-width: 320px; aspect-ratio: 1/1;
       border: 2px solid #333; border-radius: 8px; overflow: hidden; background: #000;
@@ -56,6 +57,7 @@
 <body>
 
   <h3>Webbing Auto-Aligner</h3>
+  <p class="version">Version 2026.09.28.1</p>
 
   <!-- Camera Live Viewfinder -->
   <div class="viewfinder">
@@ -109,6 +111,7 @@
 
     // Pre-flight check
     function preFlightCheck() {
+      log(`Version: ${document.querySelector('.version').textContent}`);
       log(`Protocol: ${window.location.protocol}`);
       log(`Secure Context: ${window.isSecureContext ? "YES" : "NO"}`);
       log("Ready. Tap '1. Start Camera' to begin.");
@@ -223,6 +226,8 @@
       if (!isRunning) return;
 
       if (!waitingForAck && video.videoWidth > 0) {
+        let inputTensor;
+        let output;
         try {
           // A. Center-crop video square to 224x224
           const minDim = Math.min(video.videoWidth, video.videoHeight);
@@ -241,10 +246,10 @@
           }
 
           // C. Build tensor directly (no .toFloat() or prototype chaining needed)
-          const inputTensor = tf.tensor(float32Values, [1, 224, 224, 3], 'float32');
+          inputTensor = tf.tensor(float32Values, [1, 224, 224, 3], 'float32');
 
           // D. Predict
-          const output = tfliteModel.predict(inputTensor);
+          output = tfliteModel.predict(inputTensor);
 
           // Handle single Tensor or NamedTensorMap
           let outTensor = output;
@@ -253,21 +258,18 @@
             outTensor = output[firstKey];
           }
 
+          if (!outTensor || typeof outTensor.data !== 'function') {
+            throw new Error("Model returned no usable output tensor.");
+          }
+
           const rawData = await outTensor.data();
           const raw = rawData[0];
-
-          // Memory cleanup
-          inputTensor.dispose();
-          if (output instanceof tf.Tensor) {
-            output.dispose();
-          } else {
-            for (const k in output) {
-              if (output[k] && output[k].dispose) output[k].dispose();
-            }
+          if (!Number.isFinite(raw) || raw < 0 || raw > 1) {
+            throw new Error(`Model returned invalid confidence: ${raw}`);
           }
 
           // E. Process prediction matching Python threshold
-          const isUp = raw > 0.5;
+          const isUp = raw >= 0.5;
           const conf = ((isUp ? raw : (1.0 - raw)) * 100).toFixed(1);
           log(`Detected: <b>${isUp ? 'UP' : 'DOWN'}</b> (${conf}%) [raw: ${raw.toFixed(3)}]`);
 
@@ -275,8 +277,8 @@
             log("<span style='color:#00ff88;font-weight:bold;'>ALIGNED! Line is UP.</span>");
             btnAlign.click(); // Stop alignment loop
             return;
-          } else {
-            // Webbing is DOWN -> step motor
+          } else if (!isUp && raw <= 0.30) {
+            // Step only when the model confidently identifies DOWN.
             await sendStep();
 
             // Safety timeout in case a BLE notification is dropped
@@ -286,9 +288,20 @@
                 waitingForAck = false;
               }
             }, 1500);
+          } else {
+            log("Uncertain orientation. Waiting for a clearer reading.", "warn");
           }
         } catch (err) {
           log(`Inference error: ${err.message}`, "err");
+        } finally {
+          if (inputTensor) inputTensor.dispose();
+          if (output instanceof tf.Tensor) {
+            output.dispose();
+          } else if (output) {
+            for (const tensor of Object.values(output)) {
+              if (tensor && typeof tensor.dispose === 'function') tensor.dispose();
+            }
+          }
         }
       }
 
