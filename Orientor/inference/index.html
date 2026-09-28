@@ -5,14 +5,14 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
   <title>Line Alignment Controller</title>
   
-  <!-- TensorFlow.js & TFLite Backend -->
+  <!-- Compatible Core + CPU + TFLite Scripts -->
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-core@4.10.0/dist/tf-core.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-cpu@4.10.0/dist/tf-backend-cpu.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-tflite@0.0.1-alpha.9/dist/tf-tflite.min.js"></script>
 
   <style>
     body {
-      font-family: system-ui, sans-serif;
+      font-family: system-ui, -apple-system, sans-serif;
       margin: 0; padding: 12px; background: #121212; color: #fff;
       display: flex; flex-direction: column; align-items: center;
     }
@@ -34,6 +34,14 @@
     button:disabled { background: #444; color: #888; }
     button.manual { background: #ff9800; }
     button.stop { background: #d9534f; }
+
+    .preview-bar {
+      display: flex; align-items: center; justify-content: space-between;
+      width: 100%; max-width: 320px; margin-top: 6px; font-size: 12px; color: #888;
+    }
+    canvas#cropCanvas {
+      width: 48px; height: 48px; border: 1px solid #555; border-radius: 4px;
+    }
     
     #console {
       width: 100%; max-width: 320px; height: 160px;
@@ -49,9 +57,15 @@
 
   <h3>Webbing Auto-Aligner</h3>
 
+  <!-- Camera Live Viewfinder -->
   <div class="viewfinder">
     <video id="webcam" autoplay playsinline muted></video>
     <div class="reticle"></div>
+  </div>
+
+  <div class="preview-bar">
+    <span>Model View (224x224):</span>
+    <canvas id="cropCanvas" width="224" height="224"></canvas>
   </div>
 
   <div class="row">
@@ -63,8 +77,7 @@
     <button id="btnAlign" disabled>Auto Align</button>
   </div>
 
-  <canvas id="cropCanvas" width="224" height="224" style="display:none;"></canvas>
-
+  <!-- On-Screen Debug Console -->
   <div id="console"></div>
 
   <script>
@@ -78,7 +91,6 @@
       logBox.scrollTop = logBox.scrollHeight;
     }
 
-    // Capture every unhandled JS / Promise error
     window.onerror = (msg, url, line) => log(`Error: ${msg} (line ${line})`, "err");
     window.onunhandledrejection = (e) => log(`Async Error: ${e.reason}`, "err");
 
@@ -95,30 +107,14 @@
     const btnStep = document.getElementById('btnStep');
     const btnAlign = document.getElementById('btnAlign');
 
-    // 0. Pre-Flight Check on Page Load
+    // Pre-flight check
     function preFlightCheck() {
       log(`Protocol: ${window.location.protocol}`);
-      log(`Secure Context: ${window.isSecureContext ? "YES" : "NO"}`, window.isSecureContext ? "" : "err");
-
-      if (!window.isSecureContext) {
-        log("CRITICAL: Camera and BLE are disabled by Chrome unless HTTPS or localhost is used!", "err");
-        log("See fix instructions below.", "warn");
-      }
-
-      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        log("navigator.mediaDevices is UNDEFINED in this context.", "err");
-      } else {
-        log("Camera API is available. Click 'Start Camera'.");
-      }
-
-      if (!navigator.bluetooth) {
-        log("Bluetooth API is UNDEFINED in this context.", "err");
-      } else {
-        log("Web Bluetooth is available.");
-      }
+      log(`Secure Context: ${window.isSecureContext ? "YES" : "NO"}`);
+      log("Ready. Tap '1. Start Camera' to begin.");
     }
 
-    // 1. Explicit user-triggered camera start (avoids mobile autoplay blocking)
+    // 1. Start Camera
     btnStartCam.onclick = async () => {
       try {
         log("Requesting rear camera...");
@@ -132,11 +128,11 @@
         });
         video.srcObject = stream;
         await video.play();
-        log("Camera active!");
+        log("Camera active.");
         btnStartCam.disabled = true;
         btnConnect.disabled = false;
 
-        // Load model once camera is rolling
+        // Load Model
         loadModel();
       } catch (err) {
         log(`Camera failed: ${err.message}`, "err");
@@ -148,13 +144,15 @@
       try {
         log("Loading TFLite runtime...");
         await tf.ready();
+        tflite.setWasmPath('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-tflite@0.0.1-alpha.9/dist/');
+        
         log("Loading webbing_model.tflite...");
         tfliteModel = await tflite.loadTFLiteModel('/Taper/Orientor/inference/webbing_model.tflite');
-        log("TFLite Model ready.");
+        log("<span style='color:#00ff88'>TFLite Model ready!</span>");
+        
         if (rxChar) btnAlign.disabled = false;
       } catch (err) {
         log(`Model load failed: ${err.message}`, "err");
-        log("Check if 'webbing_model.tflite' exists next to index.html", "warn");
       }
     }
 
@@ -178,7 +176,7 @@
           log("ESP32 Ack: Step completed.");
         });
 
-        log("BLE Connected!");
+        log("<span style='color:#00ff88'>BLE Connected!</span>");
         btnConnect.disabled = true;
         btnStep.disabled = false;
         if (tfliteModel) btnAlign.disabled = false;
@@ -187,7 +185,7 @@
       }
     };
 
-    // 4. Manual Step
+    // 4. Send Step Command
     btnStep.onclick = async () => {
       await sendStep();
     };
@@ -198,7 +196,7 @@
         waitingForAck = true;
         const enc = new TextEncoder();
         await rxChar.writeValue(enc.encode("R"));
-        log("Sent: 'R'");
+        log("Sent: 'R' (Step)");
       } catch (err) {
         waitingForAck = false;
         log(`Step failed: ${err.message}`, "err");
@@ -211,10 +209,12 @@
         isRunning = false;
         btnAlign.innerText = "Auto Align";
         btnAlign.classList.remove("stop");
+        log("Alignment stopped.");
       } else {
         isRunning = true;
         btnAlign.innerText = "Stop";
         btnAlign.classList.add("stop");
+        log("Starting alignment loop...");
         runLoop();
       }
     };
@@ -223,39 +223,76 @@
       if (!isRunning) return;
 
       if (!waitingForAck && video.videoWidth > 0) {
-        // Center crop to 224x224
-        const minDim = Math.min(video.videoWidth, video.videoHeight);
-        const sx = (video.videoWidth - minDim) / 2;
-        const sy = (video.videoHeight - minDim) / 2;
-        cropCtx.drawImage(video, sx, sy, minDim, minDim, 0, 0, 224, 224);
-
-        const inputTensor = tf.tidy(() => {
-          return tf.browser.fromPixels(cropCanvas).toFloat().expandDims(0);
-        });
-
         try {
-          const outputTensor = tfliteModel.predict(inputTensor);
-          const raw = (await outputTensor.data())[0];
-          inputTensor.dispose();
-          outputTensor.dispose();
+          // A. Center-crop video square to 224x224
+          const minDim = Math.min(video.videoWidth, video.videoHeight);
+          const sx = (video.videoWidth - minDim) / 2;
+          const sy = (video.videoHeight - minDim) / 2;
+          cropCtx.drawImage(video, sx, sy, minDim, minDim, 0, 0, 224, 224);
 
+          // B. Extract raw RGBA and pack RGB directly into Float32Array (0.0 to 255.0)
+          const imgData = cropCtx.getImageData(0, 0, 224, 224).data;
+          const float32Values = new Float32Array(1 * 224 * 224 * 3);
+          let ptr = 0;
+          for (let i = 0; i < imgData.length; i += 4) {
+            float32Values[ptr++] = imgData[i];     // Red
+            float32Values[ptr++] = imgData[i + 1]; // Green
+            float32Values[ptr++] = imgData[i + 2]; // Blue
+          }
+
+          // C. Build tensor directly (no .toFloat() or prototype chaining needed)
+          const inputTensor = tf.tensor(float32Values, [1, 224, 224, 3], 'float32');
+
+          // D. Predict
+          const output = tfliteModel.predict(inputTensor);
+
+          // Handle single Tensor or NamedTensorMap
+          let outTensor = output;
+          if (!(output instanceof tf.Tensor)) {
+            const firstKey = Object.keys(output)[0];
+            outTensor = output[firstKey];
+          }
+
+          const rawData = await outTensor.data();
+          const raw = rawData[0];
+
+          // Memory cleanup
+          inputTensor.dispose();
+          if (output instanceof tf.Tensor) {
+            output.dispose();
+          } else {
+            for (const k in output) {
+              if (output[k] && output[k].dispose) output[k].dispose();
+            }
+          }
+
+          // E. Process prediction matching Python threshold
           const isUp = raw > 0.5;
           const conf = ((isUp ? raw : (1.0 - raw)) * 100).toFixed(1);
-          log(`Inference: ${isUp ? 'UP' : 'DOWN'} (${conf}%)`);
+          log(`Detected: <b>${isUp ? 'UP' : 'DOWN'}</b> (${conf}%) [raw: ${raw.toFixed(3)}]`);
 
           if (isUp && raw >= 0.70) {
-            log("TARGET REACHED! Stopping.");
-            btnAlign.click();
+            log("<span style='color:#00ff88;font-weight:bold;'>ALIGNED! Line is UP.</span>");
+            btnAlign.click(); // Stop alignment loop
             return;
           } else {
+            // Webbing is DOWN -> step motor
             await sendStep();
-            setTimeout(() => { waitingForAck = false; }, 1200); // Safety timeout
+
+            // Safety timeout in case a BLE notification is dropped
+            setTimeout(() => {
+              if (waitingForAck) {
+                log("Ack timeout fallback. Continuing...", "warn");
+                waitingForAck = false;
+              }
+            }, 1500);
           }
         } catch (err) {
           log(`Inference error: ${err.message}`, "err");
         }
       }
 
+      // Small delay between checks
       setTimeout(runLoop, 250);
     }
 
