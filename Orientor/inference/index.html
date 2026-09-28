@@ -5,7 +5,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
   <title>Line Alignment Controller</title>
   
+<<<<<<< HEAD
   <!-- Compatible Core + CPU + TFLite Scripts -->
+=======
+  <!-- TensorFlow.js & TFLite Backend -->
+>>>>>>> parent of 2f7172b (Update index.html)
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-core@4.10.0/dist/tf-core.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-cpu@4.10.0/dist/tf-backend-cpu.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-tflite@0.0.1-alpha.9/dist/tf-tflite.min.js"></script>
@@ -255,8 +259,21 @@
       if (!isRunning) return;
 
       if (!waitingForAck && video.videoWidth > 0) {
+<<<<<<< HEAD
         let inputTensor;
         let output;
+=======
+        // Center crop to 224x224
+        const minDim = Math.min(video.videoWidth, video.videoHeight);
+        const sx = (video.videoWidth - minDim) / 2;
+        const sy = (video.videoHeight - minDim) / 2;
+        cropCtx.drawImage(video, sx, sy, minDim, minDim, 0, 0, 224, 224);
+
+        const inputTensor = tf.tidy(() => {
+          return tf.browser.fromPixels(cropCanvas).toFloat().expandDims(0);
+        });
+
+>>>>>>> parent of 2f7172b (Update index.html)
         try {
           // A. Center-crop video square to 224x224
           const minDim = Math.min(video.videoWidth, video.videoHeight);
