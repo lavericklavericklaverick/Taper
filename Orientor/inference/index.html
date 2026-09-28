@@ -149,7 +149,7 @@
         log("Loading TFLite runtime...");
         await tf.ready();
         log("Loading webbing_model.tflite...");
-        tfliteModel = await tflite.loadTFLiteModel('webbing_model.tflite');
+        tfliteModel = await tflite.loadTFLiteModel('/Taper/Orientor/inference/webbing_model.tflite');
         log("TFLite Model ready.");
         if (rxChar) btnAlign.disabled = false;
       } catch (err) {
