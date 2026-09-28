@@ -5,11 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
   <title>Line Alignment Controller</title>
   
-<<<<<<< HEAD
   <!-- Compatible Core + CPU + TFLite Scripts -->
-=======
-  <!-- TensorFlow.js & TFLite Backend -->
->>>>>>> parent of 2f7172b (Update index.html)
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-core@4.10.0/dist/tf-core.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-cpu@4.10.0/dist/tf-backend-cpu.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-tflite@0.0.1-alpha.9/dist/tf-tflite.min.js"></script>
@@ -44,6 +40,16 @@
       display: flex; align-items: center; justify-content: space-between;
       width: 100%; max-width: 320px; margin-top: 6px; font-size: 12px; color: #888;
     }
+    .model-status {
+      width: 100%; max-width: 320px; margin-top: 10px; color: #bbb;
+      font-size: 12px; text-align: center;
+    }
+    .model-progress {
+      width: 100%; height: 8px; margin-top: 6px; accent-color: #00c978;
+    }
+    #btnRetryModel {
+      margin-top: 8px; padding: 8px 12px; font-size: 12px;
+    }
     canvas#cropCanvas {
       width: 48px; height: 48px; border: 1px solid #555; border-radius: 4px;
     }
@@ -61,7 +67,7 @@
 <body>
 
   <h3>Webbing Auto-Aligner</h3>
-  <p class="version">Version 2026.09.28.2</p>
+  <p class="version">Version 2026.09.28.3</p>
 
   <!-- Camera Live Viewfinder -->
   <div class="viewfinder">
@@ -72,6 +78,12 @@
   <div class="preview-bar">
     <span>Model View (224x224):</span>
     <canvas id="cropCanvas" width="224" height="224"></canvas>
+  </div>
+
+  <div class="model-status" role="status" aria-live="polite">
+    <div id="modelStatusText">Preparing model download...</div>
+    <progress id="modelProgress" class="model-progress" max="100"></progress>
+    <button id="btnRetryModel" hidden>Retry model download</button>
   </div>
 
   <div class="row">
@@ -105,6 +117,7 @@
     let isRunning = false;
     let waitingForAck = false;
     let ackTimeoutId = null;
+    let modelLoadPromise = null;
 
     const video = document.getElementById('webcam');
     const cropCanvas = document.getElementById('cropCanvas');
@@ -113,6 +126,18 @@
     const btnConnect = document.getElementById('btnConnect');
     const btnStep = document.getElementById('btnStep');
     const btnAlign = document.getElementById('btnAlign');
+    const modelStatusText = document.getElementById('modelStatusText');
+    const modelProgress = document.getElementById('modelProgress');
+    const btnRetryModel = document.getElementById('btnRetryModel');
+
+    function updateModelStatus(message, progress = null) {
+      modelStatusText.textContent = message;
+      if (progress === null) {
+        modelProgress.removeAttribute("value");
+      } else {
+        modelProgress.value = progress;
+      }
+    }
 
     // Pre-flight check
     function preFlightCheck() {
@@ -140,8 +165,6 @@
         btnStartCam.disabled = true;
         btnConnect.disabled = false;
 
-        // Load Model
-        loadModel();
       } catch (err) {
         log(`Camera failed: ${err.message}`, "err");
       }
@@ -149,20 +172,75 @@
 
     // 2. Load TFLite Model
     async function loadModel() {
-      try {
-        log("Loading TFLite runtime...");
-        await tf.ready();
-        tflite.setWasmPath('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-tflite@0.0.1-alpha.9/dist/');
-        
-        log("Loading webbing_model.tflite...");
-        tfliteModel = await tflite.loadTFLiteModel('/Taper/Orientor/inference/webbing_model.tflite');
-        log("<span style='color:#00ff88'>TFLite Model ready!</span>");
-        
-        if (rxChar) btnAlign.disabled = false;
-      } catch (err) {
-        log(`Model load failed: ${err.message}`, "err");
-      }
+      if (tfliteModel) return;
+      if (modelLoadPromise) return modelLoadPromise;
+
+      btnRetryModel.hidden = true;
+      modelLoadPromise = (async () => {
+        try {
+          updateModelStatus("Preparing TensorFlow Lite runtime...");
+          log("Loading TFLite runtime...");
+          await tf.ready();
+          tflite.setWasmPath('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-tflite@0.0.1-alpha.9/dist/');
+
+          const modelUrl = '/Taper/Orientor/inference/webbing_model.tflite';
+          updateModelStatus("Downloading model...");
+          log("Downloading webbing_model.tflite...");
+          const response = await fetch(modelUrl);
+          if (!response.ok) {
+            throw new Error(`Model download failed: HTTP ${response.status} ${response.statusText}`);
+          }
+
+          const totalBytes = Number(response.headers.get("content-length"));
+          let modelBlob;
+          if (response.body && response.body.getReader) {
+            const reader = response.body.getReader();
+            const chunks = [];
+            let receivedBytes = 0;
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              chunks.push(value);
+              receivedBytes += value.byteLength;
+              if (Number.isFinite(totalBytes) && totalBytes > 0) {
+                const percent = Math.min(100, Math.round(receivedBytes / totalBytes * 100));
+                updateModelStatus(`Downloading model... ${percent}%`, percent);
+              } else {
+                updateModelStatus(`Downloading model... ${(receivedBytes / 1024 / 1024).toFixed(1)} MB`);
+              }
+            }
+            modelBlob = new Blob(chunks, { type: "application/octet-stream" });
+          } else {
+            modelBlob = await response.blob();
+            if (Number.isFinite(totalBytes) && totalBytes > 0) {
+              updateModelStatus("Downloading model... 100%", 100);
+            }
+          }
+
+          updateModelStatus("Download complete. Initializing model...");
+          const modelObjectUrl = URL.createObjectURL(modelBlob);
+          try {
+            tfliteModel = await tflite.loadTFLiteModel(modelObjectUrl);
+          } finally {
+            URL.revokeObjectURL(modelObjectUrl);
+          }
+
+          updateModelStatus("Model ready. Start the camera and connect BLE to align.", 100);
+          log("<span style='color:#00ff88'>TFLite Model ready!</span>");
+
+          if (rxChar) btnAlign.disabled = false;
+        } catch (err) {
+          updateModelStatus(`Model load failed: ${err.message}`);
+          btnRetryModel.hidden = false;
+          log(`Model load failed: ${err.message}`, "err");
+        } finally {
+          modelLoadPromise = null;
+        }
+      })();
+      return modelLoadPromise;
     }
+
+    btnRetryModel.onclick = () => loadModel();
 
     // 3. Connect Bluetooth
     btnConnect.onclick = async () => {
@@ -259,21 +337,8 @@
       if (!isRunning) return;
 
       if (!waitingForAck && video.videoWidth > 0) {
-<<<<<<< HEAD
         let inputTensor;
         let output;
-=======
-        // Center crop to 224x224
-        const minDim = Math.min(video.videoWidth, video.videoHeight);
-        const sx = (video.videoWidth - minDim) / 2;
-        const sy = (video.videoHeight - minDim) / 2;
-        cropCtx.drawImage(video, sx, sy, minDim, minDim, 0, 0, 224, 224);
-
-        const inputTensor = tf.tidy(() => {
-          return tf.browser.fromPixels(cropCanvas).toFloat().expandDims(0);
-        });
-
->>>>>>> parent of 2f7172b (Update index.html)
         try {
           // A. Center-crop video square to 224x224
           const minDim = Math.min(video.videoWidth, video.videoHeight);
@@ -348,6 +413,7 @@
     }
 
     preFlightCheck();
+    loadModel();
   </script>
 </body>
 </html>
