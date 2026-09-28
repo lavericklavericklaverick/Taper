@@ -71,7 +71,7 @@
 <body>
 
   <h3>Webbing Auto-Aligner</h3>
-  <p class="version">Version 2026.09.28.4</p>
+  <p class="version">Version 2026.09.29.1</p>
 
   <!-- Camera Live Viewfinder -->
   <div class="viewfinder">
@@ -109,10 +109,14 @@
     const SERVICE_UUID = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
     const RX_UUID      = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
     const TX_UUID      = "6e400003-b5a3-f393-e0a9-e50e24dcca9e";
+    const MAX_LOG_ENTRIES = 80;
 
     const logBox = document.getElementById('console');
     function log(msg, cls = "") {
-      logBox.innerHTML += `<div class="${cls}">> ${msg}</div>`;
+      logBox.insertAdjacentHTML('beforeend', `<div class="${cls}">> ${msg}</div>`);
+      while (logBox.childElementCount > MAX_LOG_ENTRIES) {
+        logBox.firstElementChild.remove();
+      }
       logBox.scrollTop = logBox.scrollHeight;
     }
 
@@ -125,6 +129,8 @@
     let waitingForAck = false;
     let ackTimeoutId = null;
     let modelLoadPromise = null;
+    let alignmentRunId = 0;
+    let alignmentFrame = 0;
 
     const video = document.getElementById('webcam');
     const cropCanvas = document.getElementById('cropCanvas');
@@ -298,6 +304,7 @@
 
     function stopAlignment(message) {
       isRunning = false;
+      alignmentRunId++;
       btnAlign.innerText = "Auto Align";
       btnAlign.classList.remove("stop");
       setAlignmentStatus(message);
@@ -366,31 +373,37 @@
           return;
         }
         isRunning = true;
+        const runId = ++alignmentRunId;
+        alignmentFrame = 0;
         btnAlign.innerText = "Stop";
         btnAlign.classList.add("stop");
-        log("Starting alignment loop...");
+        log(`Starting alignment run #${runId}. Camera: ${video.videoWidth}x${video.videoHeight}; model and BLE ready.`);
         setAlignmentStatus("Auto Align started. Capturing a frame...");
-        runLoop();
+        runLoop(runId);
       }
     };
 
-    async function runLoop() {
-      if (!isRunning) return;
+    async function runLoop(runId) {
+      if (!isRunning || runId !== alignmentRunId) return;
 
       if (waitingForAck) {
-        setTimeout(runLoop, 250);
+        setTimeout(() => runLoop(runId), 250);
         return;
       }
 
       if (video.videoWidth === 0 || video.videoHeight === 0) {
         setAlignmentStatus("Auto Align is waiting for a live camera frame...");
-        setTimeout(runLoop, 250);
+        log(`Run #${runId}: camera has no frame dimensions yet.`, "warn");
+        setTimeout(() => runLoop(runId), 250);
         return;
       }
 
+      const frameNumber = ++alignmentFrame;
+      const frameStartedAt = performance.now();
       let inputTensor;
       let output;
       try {
+        log(`Run #${runId}, frame ${frameNumber}: reading ${video.videoWidth}x${video.videoHeight} camera frame.`);
         setAlignmentStatus("Reading camera frame and running the model...");
         // A. Center-crop video square to 224x224
         const minDim = Math.min(video.videoWidth, video.videoHeight);
@@ -407,12 +420,19 @@
           float32Values[ptr++] = imgData[i + 1]; // Green
           float32Values[ptr++] = imgData[i + 2]; // Blue
         }
+        log(`Run #${runId}, frame ${frameNumber}: crop ready in ${(performance.now() - frameStartedAt).toFixed(0)} ms.`);
 
         // C. Build tensor directly (no .toFloat() or prototype chaining needed)
         inputTensor = tf.tensor(float32Values, [1, 224, 224, 3], 'float32');
 
-        // D. Predict
+        // Yield once so the "predicting" diagnostic is painted before synchronous inference.
+        setAlignmentStatus(`Frame ${frameNumber}: running model inference...`);
+        log(`Run #${runId}, frame ${frameNumber}: calling TFLite predict.`);
+        await new Promise(resolve => requestAnimationFrame(() => resolve()));
+        if (!isRunning || runId !== alignmentRunId) return;
+        const predictionStartedAt = performance.now();
         output = tfliteModel.predict(inputTensor);
+        log(`Run #${runId}, frame ${frameNumber}: TFLite predict returned in ${(performance.now() - predictionStartedAt).toFixed(0)} ms.`);
 
         // Handle single Tensor or NamedTensorMap
         let outTensor = output;
@@ -426,7 +446,7 @@
         }
 
         const rawData = await outTensor.data();
-        if (!isRunning) return;
+        if (!isRunning || runId !== alignmentRunId) return;
         const raw = rawData[0];
         if (!Number.isFinite(raw) || raw < 0 || raw > 1) {
           throw new Error(`Model returned invalid confidence: ${raw}`);
@@ -435,7 +455,7 @@
         // E. Process prediction matching Python threshold
         const isUp = raw >= 0.5;
         const conf = ((isUp ? raw : (1.0 - raw)) * 100).toFixed(1);
-        log(`Detected: <b>${isUp ? 'UP' : 'DOWN'}</b> (${conf}%) [raw: ${raw.toFixed(3)}]`);
+        log(`Run #${runId}, frame ${frameNumber}: detected <b>${isUp ? 'UP' : 'DOWN'}</b> (${conf}%) [raw: ${raw.toFixed(3)}], total ${(performance.now() - frameStartedAt).toFixed(0)} ms.`);
 
         if (isUp && raw >= 0.70) {
           stopAlignment(`ALIGNED — model detects UP (${conf}%).`);
@@ -453,8 +473,10 @@
           log("Uncertain orientation. Waiting for a clearer reading.", "warn");
         }
       } catch (err) {
-        setAlignmentStatus(`Inference failed: ${err.message}`);
-        log(`Inference error: ${err.message}`, "err");
+        if (isRunning && runId === alignmentRunId) {
+          setAlignmentStatus(`Inference failed: ${err.message}`);
+          log(`Run #${runId}, frame ${frameNumber} failed: ${err.name}: ${err.message}`, "err");
+        }
       } finally {
         if (inputTensor) inputTensor.dispose();
         if (output instanceof tf.Tensor) {
@@ -466,7 +488,9 @@
         }
       }
 
-      setTimeout(runLoop, 250);
+      if (isRunning && runId === alignmentRunId) {
+        setTimeout(() => runLoop(runId), 250);
+      }
     }
 
     preFlightCheck();

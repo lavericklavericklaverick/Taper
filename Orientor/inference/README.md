@@ -24,3 +24,11 @@
 5. During alignment, read the status below the model progress bar: it reports camera/model inference, the predicted orientation and confidence, each step, and any missing prerequisite or error.
 
 Auto Align steps only for a confident DOWN prediction (`raw <= 0.30`) and stops for a confident UP prediction (`raw >= 0.70`). Predictions between those thresholds are reported but do not move the motor.
+
+## Diagnosing Auto Align
+
+- Confirm the page shows the version in `index.html`; the browser tab may still have an older deployment cached.
+- The on-screen console keeps the latest 80 messages so repeated predictions cannot grow the page indefinitely.
+- Each alignment frame logs the camera dimensions, crop time, TFLite predict start and duration, and prediction/confidence.
+- If the page stops responding, note the last visible frame message. A last message saying `calling TFLite predict` points to the synchronous model prediction; later messages narrow it to output reading or motor communication.
+- After changing the page, repeat the pre-publish checks and wait for GitHub Pages deployment before testing.
