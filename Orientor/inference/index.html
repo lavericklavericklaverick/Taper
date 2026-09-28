@@ -47,6 +47,10 @@
     .model-progress {
       width: 100%; height: 8px; margin-top: 6px; accent-color: #00c978;
     }
+    .alignment-status {
+      width: 100%; max-width: 320px; min-height: 18px; margin-top: 8px;
+      color: #00ff88; font-size: 13px; font-weight: 600; text-align: center;
+    }
     #btnRetryModel {
       margin-top: 8px; padding: 8px 12px; font-size: 12px;
     }
@@ -67,7 +71,7 @@
 <body>
 
   <h3>Webbing Auto-Aligner</h3>
-  <p class="version">Version 2026.09.28.3</p>
+  <p class="version">Version 2026.09.28.4</p>
 
   <!-- Camera Live Viewfinder -->
   <div class="viewfinder">
@@ -84,6 +88,9 @@
     <div id="modelStatusText">Preparing model download...</div>
     <progress id="modelProgress" class="model-progress" max="100"></progress>
     <button id="btnRetryModel" hidden>Retry model download</button>
+  </div>
+  <div id="alignmentStatus" class="alignment-status" role="status" aria-live="polite">
+    Start camera, connect BLE, and tap Auto Align.
   </div>
 
   <div class="row">
@@ -129,6 +136,11 @@
     const modelStatusText = document.getElementById('modelStatusText');
     const modelProgress = document.getElementById('modelProgress');
     const btnRetryModel = document.getElementById('btnRetryModel');
+    const alignmentStatus = document.getElementById('alignmentStatus');
+
+    function setAlignmentStatus(message) {
+      alignmentStatus.textContent = message;
+    }
 
     function updateModelStatus(message, progress = null) {
       modelStatusText.textContent = message;
@@ -166,6 +178,7 @@
         btnConnect.disabled = false;
 
       } catch (err) {
+        setAlignmentStatus(`Camera failed: ${err.message}`);
         log(`Camera failed: ${err.message}`, "err");
       }
     };
@@ -261,6 +274,9 @@
           if (ackTimeoutId !== null) clearTimeout(ackTimeoutId);
           ackTimeoutId = null;
           waitingForAck = false;
+          setAlignmentStatus(isRunning
+            ? "Stepper finished. Checking the webbing again..."
+            : "Test step finished.");
           log("ESP32 Ack: Step completed.");
         });
 
@@ -269,6 +285,7 @@
         btnStep.disabled = false;
         if (tfliteModel) btnAlign.disabled = false;
       } catch (err) {
+        setAlignmentStatus(`BLE connection failed: ${err.message}`);
         log(`BLE failed: ${err.message}`, "err");
       }
     };
@@ -279,17 +296,28 @@
       await sendStep();
     };
 
+    function stopAlignment(message) {
+      isRunning = false;
+      btnAlign.innerText = "Auto Align";
+      btnAlign.classList.remove("stop");
+      setAlignmentStatus(message);
+      log(message);
+    }
+
     async function sendStep() {
       if (!rxChar) {
+        setAlignmentStatus("Step not sent: connect to BLE first.");
         log("Step unavailable: connect to BLE first.", "err");
-        return;
+        return false;
       }
       if (waitingForAck) {
+        setAlignmentStatus("Waiting for the previous step to finish.");
         log("Step unavailable: waiting for the previous step to finish.", "warn");
-        return;
+        return false;
       }
       try {
         waitingForAck = true;
+        setAlignmentStatus("Sending step command to the motor...");
         const enc = new TextEncoder();
         const command = enc.encode("R");
         if (typeof rxChar.writeValueWithResponse === 'function') {
@@ -301,34 +329,47 @@
         ackTimeoutId = setTimeout(() => {
           if (waitingForAck) {
             waitingForAck = false;
+            ackTimeoutId = null;
+            if (isRunning) {
+              stopAlignment("Stopped: no step-complete acknowledgement. Check the ESP32 and motor driver.");
+            } else {
+              setAlignmentStatus("No step-complete acknowledgement. Check the ESP32 and motor driver.");
+            }
             log("No step-complete acknowledgement received. Check the ESP32 firmware and motor driver.", "err");
           }
         }, 5000);
+        setAlignmentStatus("Step sent. Waiting for the motor to finish...");
+        return true;
       } catch (err) {
         if (ackTimeoutId !== null) clearTimeout(ackTimeoutId);
         ackTimeoutId = null;
         waitingForAck = false;
+        setAlignmentStatus(`Step failed: ${err.message}`);
         log(`Step failed: ${err.message}`, "err");
+        return false;
       }
     }
 
     // 5. Alignment Loop
     btnAlign.onclick = () => {
       if (isRunning) {
-        isRunning = false;
-        btnAlign.innerText = "Auto Align";
-        btnAlign.classList.remove("stop");
-        log("Alignment stopped.");
+        stopAlignment("Alignment stopped.");
       } else {
-        if (!rxChar || !tfliteModel || video.videoWidth === 0) {
-          log("Auto Align unavailable: start the camera and wait for the model to load, then connect BLE.", "err");
+        const missing = [];
+        if (video.videoWidth === 0) missing.push("camera");
+        if (!tfliteModel) missing.push("model");
+        if (!rxChar) missing.push("BLE");
+        if (missing.length > 0) {
+          const message = `Auto Align needs ${missing.join(", ")} ready.`;
+          setAlignmentStatus(message);
+          log(message, "err");
           return;
         }
         isRunning = true;
         btnAlign.innerText = "Stop";
         btnAlign.classList.add("stop");
         log("Starting alignment loop...");
-        log("Capturing a frame for the first orientation reading...");
+        setAlignmentStatus("Auto Align started. Capturing a frame...");
         runLoop();
       }
     };
@@ -336,79 +377,95 @@
     async function runLoop() {
       if (!isRunning) return;
 
-      if (!waitingForAck && video.videoWidth > 0) {
-        let inputTensor;
-        let output;
-        try {
-          // A. Center-crop video square to 224x224
-          const minDim = Math.min(video.videoWidth, video.videoHeight);
-          const sx = (video.videoWidth - minDim) / 2;
-          const sy = (video.videoHeight - minDim) / 2;
-          cropCtx.drawImage(video, sx, sy, minDim, minDim, 0, 0, 224, 224);
+      if (waitingForAck) {
+        setTimeout(runLoop, 250);
+        return;
+      }
 
-          // B. Extract raw RGBA and pack RGB directly into Float32Array (0.0 to 255.0)
-          const imgData = cropCtx.getImageData(0, 0, 224, 224).data;
-          const float32Values = new Float32Array(1 * 224 * 224 * 3);
-          let ptr = 0;
-          for (let i = 0; i < imgData.length; i += 4) {
-            float32Values[ptr++] = imgData[i];     // Red
-            float32Values[ptr++] = imgData[i + 1]; // Green
-            float32Values[ptr++] = imgData[i + 2]; // Blue
-          }
+      if (video.videoWidth === 0 || video.videoHeight === 0) {
+        setAlignmentStatus("Auto Align is waiting for a live camera frame...");
+        setTimeout(runLoop, 250);
+        return;
+      }
 
-          // C. Build tensor directly (no .toFloat() or prototype chaining needed)
-          inputTensor = tf.tensor(float32Values, [1, 224, 224, 3], 'float32');
+      let inputTensor;
+      let output;
+      try {
+        setAlignmentStatus("Reading camera frame and running the model...");
+        // A. Center-crop video square to 224x224
+        const minDim = Math.min(video.videoWidth, video.videoHeight);
+        const sx = (video.videoWidth - minDim) / 2;
+        const sy = (video.videoHeight - minDim) / 2;
+        cropCtx.drawImage(video, sx, sy, minDim, minDim, 0, 0, 224, 224);
 
-          // D. Predict
-          output = tfliteModel.predict(inputTensor);
+        // B. Extract raw RGBA and pack RGB directly into Float32Array (0.0 to 255.0)
+        const imgData = cropCtx.getImageData(0, 0, 224, 224).data;
+        const float32Values = new Float32Array(1 * 224 * 224 * 3);
+        let ptr = 0;
+        for (let i = 0; i < imgData.length; i += 4) {
+          float32Values[ptr++] = imgData[i];     // Red
+          float32Values[ptr++] = imgData[i + 1]; // Green
+          float32Values[ptr++] = imgData[i + 2]; // Blue
+        }
 
-          // Handle single Tensor or NamedTensorMap
-          let outTensor = output;
-          if (!(output instanceof tf.Tensor)) {
-            const firstKey = Object.keys(output)[0];
-            outTensor = output[firstKey];
-          }
+        // C. Build tensor directly (no .toFloat() or prototype chaining needed)
+        inputTensor = tf.tensor(float32Values, [1, 224, 224, 3], 'float32');
 
-          if (!outTensor || typeof outTensor.data !== 'function') {
-            throw new Error("Model returned no usable output tensor.");
-          }
+        // D. Predict
+        output = tfliteModel.predict(inputTensor);
 
-          const rawData = await outTensor.data();
-          const raw = rawData[0];
-          if (!Number.isFinite(raw) || raw < 0 || raw > 1) {
-            throw new Error(`Model returned invalid confidence: ${raw}`);
-          }
+        // Handle single Tensor or NamedTensorMap
+        let outTensor = output;
+        if (!(output instanceof tf.Tensor)) {
+          const firstKey = Object.keys(output)[0];
+          outTensor = output[firstKey];
+        }
 
-          // E. Process prediction matching Python threshold
-          const isUp = raw >= 0.5;
-          const conf = ((isUp ? raw : (1.0 - raw)) * 100).toFixed(1);
-          log(`Detected: <b>${isUp ? 'UP' : 'DOWN'}</b> (${conf}%) [raw: ${raw.toFixed(3)}]`);
+        if (!outTensor || typeof outTensor.data !== 'function') {
+          throw new Error("Model returned no usable output tensor.");
+        }
 
-          if (isUp && raw >= 0.70) {
-            log("<span style='color:#00ff88;font-weight:bold;'>ALIGNED! Line is UP.</span>");
-            btnAlign.click(); // Stop alignment loop
+        const rawData = await outTensor.data();
+        if (!isRunning) return;
+        const raw = rawData[0];
+        if (!Number.isFinite(raw) || raw < 0 || raw > 1) {
+          throw new Error(`Model returned invalid confidence: ${raw}`);
+        }
+
+        // E. Process prediction matching Python threshold
+        const isUp = raw >= 0.5;
+        const conf = ((isUp ? raw : (1.0 - raw)) * 100).toFixed(1);
+        log(`Detected: <b>${isUp ? 'UP' : 'DOWN'}</b> (${conf}%) [raw: ${raw.toFixed(3)}]`);
+
+        if (isUp && raw >= 0.70) {
+          stopAlignment(`ALIGNED — model detects UP (${conf}%).`);
+          return;
+        } else if (!isUp && raw <= 0.30) {
+          // Step only when the model confidently identifies DOWN.
+          setAlignmentStatus(`Detected DOWN (${conf}%). Sending a step...`);
+          const sent = await sendStep();
+          if (!sent) {
+            stopAlignment("Alignment stopped because the step command failed.");
             return;
-          } else if (!isUp && raw <= 0.30) {
-            // Step only when the model confidently identifies DOWN.
-            await sendStep();
-          } else {
-            log("Uncertain orientation. Waiting for a clearer reading.", "warn");
           }
-        } catch (err) {
-          log(`Inference error: ${err.message}`, "err");
-        } finally {
-          if (inputTensor) inputTensor.dispose();
-          if (output instanceof tf.Tensor) {
-            output.dispose();
-          } else if (output) {
-            for (const tensor of Object.values(output)) {
-              if (tensor && typeof tensor.dispose === 'function') tensor.dispose();
-            }
+        } else {
+          setAlignmentStatus(`Detected ${isUp ? 'UP' : 'DOWN'} (${conf}%), but not confidently enough to move. Rechecking...`);
+          log("Uncertain orientation. Waiting for a clearer reading.", "warn");
+        }
+      } catch (err) {
+        setAlignmentStatus(`Inference failed: ${err.message}`);
+        log(`Inference error: ${err.message}`, "err");
+      } finally {
+        if (inputTensor) inputTensor.dispose();
+        if (output instanceof tf.Tensor) {
+          output.dispose();
+        } else if (output) {
+          for (const tensor of Object.values(output)) {
+            if (tensor && typeof tensor.dispose === 'function') tensor.dispose();
           }
         }
       }
 
-      // Small delay between checks
       setTimeout(runLoop, 250);
     }
 
