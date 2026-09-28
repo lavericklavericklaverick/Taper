@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>Line Alignment Controller</title>
+  
+  <!-- TensorFlow.js & TFLite Backend -->
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-core@4.10.0/dist/tf-core.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-cpu@4.10.0/dist/tf-backend-cpu.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-tflite@0.0.1-alpha.9/dist/tf-tflite.min.js"></script>
+
+  <style>
+    body {
+      font-family: system-ui, sans-serif;
+      margin: 0; padding: 12px; background: #121212; color: #fff;
+      display: flex; flex-direction: column; align-items: center;
+    }
+    h3 { margin: 8px 0; color: #4da3ff; }
+    .viewfinder {
+      position: relative; width: 100%; max-width: 320px; aspect-ratio: 1/1;
+      border: 2px solid #333; border-radius: 8px; overflow: hidden; background: #000;
+    }
+    video { width: 100%; height: 100%; object-fit: cover; }
+    .reticle {
+      position: absolute; top: 15%; left: 15%; width: 70%; height: 70%;
+      border: 2px dashed #00ff88; box-sizing: border-box; pointer-events: none;
+    }
+    .row { display: flex; gap: 8px; margin-top: 10px; width: 100%; max-width: 320px; }
+    button {
+      flex: 1; padding: 12px 6px; font-size: 14px; font-weight: bold;
+      border-radius: 6px; border: none; background: #007bff; color: white;
+    }
+    button:disabled { background: #444; color: #888; }
+    button.manual { background: #ff9800; }
+    button.stop { background: #d9534f; }
+    
+    #console {
+      width: 100%; max-width: 320px; height: 160px;
+      background: #1c1c1c; border: 1px solid #333; border-radius: 6px;
+      font-family: monospace; font-size: 11px; padding: 8px;
+      overflow-y: scroll; margin-top: 10px; box-sizing: border-box; color: #00ff66;
+    }
+    .err { color: #ff5555; }
+    .warn { color: #ffcc00; }
+  </style>
+</head>
+<body>
+
+  <h3>Webbing Auto-Aligner</h3>
+
+  <div class="viewfinder">
+    <video id="webcam" autoplay playsinline muted></video>
+    <div class="reticle"></div>
+  </div>
+
+  <div class="row">
+    <button id="btnStartCam">1. Start Camera</button>
+    <button id="btnConnect" disabled>2. Connect BLE</button>
+  </div>
+  <div class="row">
+    <button id="btnStep" class="manual" disabled>Test Step ('R')</button>
+    <button id="btnAlign" disabled>Auto Align</button>
+  </div>
+
+  <canvas id="cropCanvas" width="224" height="224" style="display:none;"></canvas>
+
+  <div id="console"></div>
+
+  <script>
+    const SERVICE_UUID = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
+    const RX_UUID      = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
+    const TX_UUID      = "6e400003-b5a3-f393-e0a9-e50e24dcca9e";
+
+    const logBox = document.getElementById('console');
+    function log(msg, cls = "") {
+      logBox.innerHTML += `<div class="${cls}">> ${msg}</div>`;
+      logBox.scrollTop = logBox.scrollHeight;
+    }
+
+    // Capture every unhandled JS / Promise error
+    window.onerror = (msg, url, line) => log(`Error: ${msg} (line ${line})`, "err");
+    window.onunhandledrejection = (e) => log(`Async Error: ${e.reason}`, "err");
+
+    let rxChar = null;
+    let tfliteModel = null;
+    let isRunning = false;
+    let waitingForAck = false;
+
+    const video = document.getElementById('webcam');
+    const cropCanvas = document.getElementById('cropCanvas');
+    const cropCtx = cropCanvas.getContext('2d');
+    const btnStartCam = document.getElementById('btnStartCam');
+    const btnConnect = document.getElementById('btnConnect');
+    const btnStep = document.getElementById('btnStep');
+    const btnAlign = document.getElementById('btnAlign');
+
+    // 0. Pre-Flight Check on Page Load
+    function preFlightCheck() {
+      log(`Protocol: ${window.location.protocol}`);
+      log(`Secure Context: ${window.isSecureContext ? "YES" : "NO"}`, window.isSecureContext ? "" : "err");
+
+      if (!window.isSecureContext) {
+        log("CRITICAL: Camera and BLE are disabled by Chrome unless HTTPS or localhost is used!", "err");
+        log("See fix instructions below.", "warn");
+      }
+
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        log("navigator.mediaDevices is UNDEFINED in this context.", "err");
+      } else {
+        log("Camera API is available. Click 'Start Camera'.");
+      }
+
+      if (!navigator.bluetooth) {
+        log("Bluetooth API is UNDEFINED in this context.", "err");
+      } else {
+        log("Web Bluetooth is available.");
+      }
+    }
+
+    // 1. Explicit user-triggered camera start (avoids mobile autoplay blocking)
+    btnStartCam.onclick = async () => {
+      try {
+        log("Requesting rear camera...");
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: { ideal: "environment" },
+            width: { ideal: 640 },
+            height: { ideal: 480 }
+          },
+          audio: false
+        });
+        video.srcObject = stream;
+        await video.play();
+        log("Camera active!");
+        btnStartCam.disabled = true;
+        btnConnect.disabled = false;
+
+        // Load model once camera is rolling
+        loadModel();
+      } catch (err) {
+        log(`Camera failed: ${err.message}`, "err");
+      }
+    };
+
+    // 2. Load TFLite Model
+    async function loadModel() {
+      try {
+        log("Loading TFLite runtime...");
+        await tf.ready();
+        log("Loading webbing_model.tflite...");
+        tfliteModel = await tflite.loadTFLiteModel('webbing_model.tflite');
+        log("TFLite Model ready.");
+        if (rxChar) btnAlign.disabled = false;
+      } catch (err) {
+        log(`Model load failed: ${err.message}`, "err");
+        log("Check if 'webbing_model.tflite' exists next to index.html", "warn");
+      }
+    }
+
+    // 3. Connect Bluetooth
+    btnConnect.onclick = async () => {
+      try {
+        log("Scanning for ESP32C6_Stepper...");
+        const device = await navigator.bluetooth.requestDevice({
+          filters: [{ name: 'ESP32C6_Stepper' }],
+          optionalServices: [SERVICE_UUID]
+        });
+
+        const server = await device.gatt.connect();
+        const service = await server.getPrimaryService(SERVICE_UUID);
+        rxChar = await service.getCharacteristic(RX_UUID);
+        const txChar = await service.getCharacteristic(TX_UUID);
+
+        await txChar.startNotifications();
+        txChar.addEventListener('characteristicvaluechanged', () => {
+          waitingForAck = false;
+          log("ESP32 Ack: Step completed.");
+        });
+
+        log("BLE Connected!");
+        btnConnect.disabled = true;
+        btnStep.disabled = false;
+        if (tfliteModel) btnAlign.disabled = false;
+      } catch (err) {
+        log(`BLE failed: ${err.message}`, "err");
+      }
+    };
+
+    // 4. Manual Step
+    btnStep.onclick = async () => {
+      await sendStep();
+    };
+
+    async function sendStep() {
+      if (!rxChar) return;
+      try {
+        waitingForAck = true;
+        const enc = new TextEncoder();
+        await rxChar.writeValue(enc.encode("R"));
+        log("Sent: 'R'");
+      } catch (err) {
+        waitingForAck = false;
+        log(`Step failed: ${err.message}`, "err");
+      }
+    }
+
+    // 5. Alignment Loop
+    btnAlign.onclick = () => {
+      if (isRunning) {
+        isRunning = false;
+        btnAlign.innerText = "Auto Align";
+        btnAlign.classList.remove("stop");
+      } else {
+        isRunning = true;
+        btnAlign.innerText = "Stop";
+        btnAlign.classList.add("stop");
+        runLoop();
+      }
+    };
+
+    async function runLoop() {
+      if (!isRunning) return;
+
+      if (!waitingForAck && video.videoWidth > 0) {
+        // Center crop to 224x224
+        const minDim = Math.min(video.videoWidth, video.videoHeight);
+        const sx = (video.videoWidth - minDim) / 2;
+        const sy = (video.videoHeight - minDim) / 2;
+        cropCtx.drawImage(video, sx, sy, minDim, minDim, 0, 0, 224, 224);
+
+        const inputTensor = tf.tidy(() => {
+          return tf.browser.fromPixels(cropCanvas).toFloat().expandDims(0);
+        });
+
+        try {
+          const outputTensor = tfliteModel.predict(inputTensor);
+          const raw = (await outputTensor.data())[0];
+          inputTensor.dispose();
+          outputTensor.dispose();
+
+          const isUp = raw > 0.5;
+          const conf = ((isUp ? raw : (1.0 - raw)) * 100).toFixed(1);
+          log(`Inference: ${isUp ? 'UP' : 'DOWN'} (${conf}%)`);
+
+          if (isUp && raw >= 0.70) {
+            log("TARGET REACHED! Stopping.");
+            btnAlign.click();
+            return;
+          } else {
+            await sendStep();
+            setTimeout(() => { waitingForAck = false; }, 1200); // Safety timeout
+          }
+        } catch (err) {
+          log(`Inference error: ${err.message}`, "err");
+        }
+      }
+
+      setTimeout(runLoop, 250);
+    }
+
+    preFlightCheck();
+  </script>
+</body>
+</html>
