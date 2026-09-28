@@ -4,6 +4,7 @@
 
 - The GitHub Pages app is `index.html` in this folder.
 - Its TFLite model is `webbing_model.tflite` in the same folder.
+- TFLite runs in `inference-worker.js` so synchronous model inference does not block the page UI.
 - The live page is <https://lavericklavericklaverick.github.io/Taper/Orientor/inference/>.
 - Commit and push changes to `main`, then wait for the Pages deployment in GitHub Actions to finish before testing the live page.
 - The page displays its version under the title. Bump it when publishing a page change, then open the live page with `?v=<version>` to avoid a stale browser cache.
@@ -12,10 +13,10 @@
 
 1. Edit the tracked file in `Orientor/inference/`; do not paste a merge-conflict result into the live page.
 2. Search `index.html` for `<<<<<<<`, `=======`, and `>>>>>>>`. None may remain: conflict markers can appear as page text and invalidate the JavaScript.
-3. Check that the inline JavaScript parses and run `git diff --check`.
+3. Check that the inline JavaScript and `inference-worker.js` parse, then run `git diff --check`.
 4. After deployment, confirm the live page shows the expected version, model-ready status, and camera preview before testing orientation checks or BLE.
 
-## Startup and orientation check.
+## Startup and orientation check
 
 1. Open the live page over HTTPS.
 2. Wait for the model status to say it is ready.
@@ -27,6 +28,9 @@
 
 - Confirm the page shows the version in `index.html`; the browser tab may still have an older deployment cached.
 - The on-screen status reports the latest orientation result or an error; the debug console keeps the latest 80 messages.
-- The model labels scores at or above `0.5` as UP and scores below `0.5` as DOWN. Confidence is the score for the predicted class.
+- TFLite inference runs in a Web Worker with one runtime thread to keep the page responsive on phones. The status and debug console remain on the page thread.
+- `trainer2.py` trains and runs the model on center-cropped, 224x224 RGB images represented as float32 pixel values from 0 to 255. The browser uses the same input shape, channel order, value range, and integer-centered square crop; the MobileNetV3 preprocessing is included in the model graph.
+- The model files at `Orientor/webbing_model.tflite` and `Orientor/inference/webbing_model.tflite` should be kept in sync; the browser loads the copy in `inference/`.
+- The model labels scores above `0.5` as UP and scores at or below `0.5` as DOWN, matching `trainer2.py`. Confidence is the score for the predicted class.
 - Orientation checks require only a ready model and an active camera; BLE is needed only for the separate manual motor-step test.
 - After changing the page, repeat the pre-publish checks and wait for GitHub Pages deployment before testing.

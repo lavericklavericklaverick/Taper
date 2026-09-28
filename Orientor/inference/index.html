@@ -5,11 +5,6 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
   <title>Line Alignment Controller</title>
   
-  <!-- Compatible Core + CPU + TFLite Scripts -->
-  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-core@4.10.0/dist/tf-core.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-cpu@4.10.0/dist/tf-backend-cpu.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-tflite@0.0.1-alpha.9/dist/tf-tflite.min.js"></script>
-
   <style>
     body {
       font-family: system-ui, -apple-system, sans-serif;
@@ -71,7 +66,7 @@
 <body>
 
   <h3>Webbing Auto-Aligner</h3>
-  <p class="version">Version 2026.09.29.2</p>
+  <p class="version">Version 2026.09.29.4</p>
 
   <!-- Camera Live Viewfinder -->
   <div class="viewfinder">
@@ -124,11 +119,15 @@
     window.onunhandledrejection = (e) => log(`Async Error: ${e.reason}`, "err");
 
     let rxChar = null;
-    let tfliteModel = null;
+    let isModelReady = false;
     let isCheckingOrientation = false;
     let waitingForAck = false;
     let ackTimeoutId = null;
     let modelLoadPromise = null;
+    let inferenceWorker = null;
+    let inferenceWorkerFailed = false;
+    let workerRequestId = 0;
+    const pendingWorkerRequests = new Map();
 
     const video = document.getElementById('webcam');
     const cropCanvas = document.getElementById('cropCanvas');
@@ -147,7 +146,7 @@
     }
 
     function updateOrientationButton() {
-      btnAlign.disabled = isCheckingOrientation || !tfliteModel || video.videoWidth === 0;
+      btnAlign.disabled = isCheckingOrientation || !isModelReady || video.videoWidth === 0;
     }
 
     function updateModelStatus(message, progress = null) {
@@ -157,6 +156,55 @@
       } else {
         modelProgress.value = progress;
       }
+    }
+
+    function createInferenceWorker() {
+      const workerUrl = new URL("inference-worker.js", document.baseURI);
+      inferenceWorker = new Worker(workerUrl);
+      inferenceWorkerFailed = false;
+      inferenceWorker.onmessage = ({ data }) => {
+        if (data.type === "runtime-status") {
+          log(data.message);
+          return;
+        }
+
+        const pending = pendingWorkerRequests.get(data.requestId);
+        if (!pending) return;
+        pendingWorkerRequests.delete(data.requestId);
+        if (data.error) {
+          pending.reject(new Error(data.error));
+        } else {
+          pending.resolve(data);
+        }
+      };
+      inferenceWorker.onerror = (event) => {
+        const error = new Error(`Inference worker failed: ${event.message}`);
+        inferenceWorkerFailed = true;
+        inferenceWorker = null;
+        for (const pending of pendingWorkerRequests.values()) {
+          pending.reject(error);
+        }
+        pendingWorkerRequests.clear();
+        updateModelStatus(error.message);
+        btnRetryModel.hidden = false;
+        log(error.message, "err");
+      };
+      return inferenceWorker;
+    }
+
+    function requestInferenceWorker(type, payload, transfer = []) {
+      if (!inferenceWorker || inferenceWorkerFailed) createInferenceWorker();
+
+      const requestId = ++workerRequestId;
+      return new Promise((resolve, reject) => {
+        pendingWorkerRequests.set(requestId, { resolve, reject });
+        try {
+          inferenceWorker.postMessage({ type, requestId, ...payload }, transfer);
+        } catch (err) {
+          pendingWorkerRequests.delete(requestId);
+          reject(err);
+        }
+      });
     }
 
     // Pre-flight check
@@ -195,20 +243,15 @@
 
     // 2. Load TFLite Model
     async function loadModel() {
-      if (tfliteModel) return;
+      if (isModelReady) return;
       if (modelLoadPromise) return modelLoadPromise;
 
       btnRetryModel.hidden = true;
       modelLoadPromise = (async () => {
         try {
-          updateModelStatus("Preparing TensorFlow Lite runtime...");
-          log("Loading TFLite runtime...");
-          await tf.ready();
-          tflite.setWasmPath('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-tflite@0.0.1-alpha.9/dist/');
-
-          const modelUrl = '/Taper/Orientor/inference/webbing_model.tflite';
-          updateModelStatus("Downloading model...");
+          updateModelStatus("Downloading model for background inference...");
           log("Downloading webbing_model.tflite...");
+          const modelUrl = new URL("webbing_model.tflite", document.baseURI);
           const response = await fetch(modelUrl);
           if (!response.ok) {
             throw new Error(`Model download failed: HTTP ${response.status} ${response.statusText}`);
@@ -240,17 +283,13 @@
             }
           }
 
-          updateModelStatus("Download complete. Initializing model...");
-          const modelObjectUrl = URL.createObjectURL(modelBlob);
-          try {
-            tfliteModel = await tflite.loadTFLiteModel(modelObjectUrl);
-          } finally {
-            URL.revokeObjectURL(modelObjectUrl);
-          }
+          updateModelStatus("Download complete. Initializing background inference...");
+          const modelBuffer = await modelBlob.arrayBuffer();
+          await requestInferenceWorker("load-model", { modelBuffer }, [modelBuffer]);
 
-          updateModelStatus("Model ready. Start the camera and connect BLE to align.", 100);
-          log("<span style='color:#00ff88'>TFLite Model ready!</span>");
-
+          isModelReady = true;
+          updateModelStatus("Model ready. Start the camera to check orientation.", 100);
+          log("TFLite model ready in background worker.");
           updateOrientationButton();
         } catch (err) {
           updateModelStatus(`Model load failed: ${err.message}`);
@@ -348,24 +387,22 @@
     // 5. Report one orientation prediction without moving the motor.
     btnAlign.onclick = async () => {
       if (isCheckingOrientation) return;
-      if (video.videoWidth === 0 || !tfliteModel) {
+      if (video.videoWidth === 0 || !isModelReady) {
         const missing = [];
         if (video.videoWidth === 0) missing.push("camera");
-        if (!tfliteModel) missing.push("model");
+        if (!isModelReady) missing.push("model");
         setAlignmentStatus(`Check Orientation needs ${missing.join(" and ")} ready.`);
         return;
       }
 
       isCheckingOrientation = true;
       updateOrientationButton();
-      let inputTensor;
-      let output;
       try {
         log(`Checking orientation from ${video.videoWidth}x${video.videoHeight} camera frame.`);
         setAlignmentStatus("Reading camera frame...");
         const minDim = Math.min(video.videoWidth, video.videoHeight);
-        const sx = (video.videoWidth - minDim) / 2;
-        const sy = (video.videoHeight - minDim) / 2;
+        const sx = Math.floor((video.videoWidth - minDim) / 2);
+        const sy = Math.floor((video.videoHeight - minDim) / 2);
         cropCtx.drawImage(video, sx, sy, minDim, minDim, 0, 0, 224, 224);
 
         const imgData = cropCtx.getImageData(0, 0, 224, 224).data;
@@ -376,32 +413,15 @@
           float32Values[ptr++] = imgData[i + 1];
           float32Values[ptr++] = imgData[i + 2];
         }
-        inputTensor = tf.tensor(float32Values, [1, 224, 224, 3], 'float32');
-
         setAlignmentStatus("Running orientation check...");
-        log("Running TFLite orientation prediction.");
         await new Promise(resolve => requestAnimationFrame(resolve));
         const predictionStartedAt = performance.now();
-        output = tfliteModel.predict(inputTensor);
-        log(`TFLite prediction returned in ${(performance.now() - predictionStartedAt).toFixed(0)} ms.`);
+        log("Sending orientation frame to background inference worker.");
+        const result = await requestInferenceWorker("predict", { pixels: float32Values }, [float32Values.buffer]);
+        const raw = result.raw;
+        log(`Background prediction returned in ${(performance.now() - predictionStartedAt).toFixed(0)} ms (model: ${result.inferenceMs.toFixed(0)} ms).`);
 
-        let outTensor = output;
-        if (!(output instanceof tf.Tensor)) {
-          const firstKey = Object.keys(output)[0];
-          outTensor = output[firstKey];
-        }
-
-        if (!outTensor || typeof outTensor.data !== 'function') {
-          throw new Error("Model returned no usable output tensor.");
-        }
-
-        const rawData = await outTensor.data();
-        const raw = rawData[0];
-        if (!Number.isFinite(raw) || raw < 0 || raw > 1) {
-          throw new Error(`Model returned invalid confidence: ${raw}`);
-        }
-
-        const isUp = raw >= 0.5;
+        const isUp = raw > 0.5;
         const conf = ((isUp ? raw : (1.0 - raw)) * 100).toFixed(1);
         const orientation = isUp ? "UP" : "DOWN";
         const message = `Model thinks webbing is ${orientation} (${conf}% confidence; raw score: ${raw.toFixed(3)}).`;
@@ -411,14 +431,6 @@
         setAlignmentStatus(`Orientation check failed: ${err.message}`);
         log(`Orientation check failed: ${err.name}: ${err.message}`, "err");
       } finally {
-        if (inputTensor) inputTensor.dispose();
-        if (output instanceof tf.Tensor) {
-          output.dispose();
-        } else if (output) {
-          for (const tensor of Object.values(output)) {
-            if (tensor && typeof tensor.dispose === 'function') tensor.dispose();
-          }
-        }
         isCheckingOrientation = false;
         updateOrientationButton();
       }
