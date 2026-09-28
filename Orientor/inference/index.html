@@ -6,9 +6,10 @@
   <title>Line Alignment Controller</title>
   
   <!-- TensorFlow.js & TFLite Backend -->
-  <!-- Replace the 2 core/cpu scripts with the complete TFJS bundle -->
-<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.10.0/dist/tf.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-tflite@0.0.1-alpha.9/dist/tf-tflite.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-core@4.10.0/dist/tf-core.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-cpu@4.10.0/dist/tf-backend-cpu.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-tflite@0.0.1-alpha.9/dist/tf-tflite.min.js"></script>
+
   <style>
     body {
       font-family: system-ui, sans-serif;
@@ -229,9 +230,7 @@
         cropCtx.drawImage(video, sx, sy, minDim, minDim, 0, 0, 224, 224);
 
         const inputTensor = tf.tidy(() => {
-          const img = tf.browser.fromPixels(cropCanvas);
-          const floatImg = tf.cast(img, 'float32'); // Matches np.float32 in Python
-          return tf.expandDims(floatImg, 0);        // Shape: [1, 224, 224, 3]
+          return tf.browser.fromPixels(cropCanvas).toFloat().expandDims(0);
         });
 
         try {
