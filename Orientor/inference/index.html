@@ -66,7 +66,7 @@
 <body>
 
   <h3>Webbing Auto-Aligner</h3>
-  <p class="version">Version 2026.09.29.4</p>
+  <p class="version">Version 2026.09.29.5</p>
 
   <!-- Camera Live Viewfinder -->
   <div class="viewfinder">
@@ -418,13 +418,23 @@
         const predictionStartedAt = performance.now();
         log("Sending orientation frame to background inference worker.");
         const result = await requestInferenceWorker("predict", { pixels: float32Values }, [float32Values.buffer]);
-        const raw = result.raw;
         log(`Background prediction returned in ${(performance.now() - predictionStartedAt).toFixed(0)} ms (model: ${result.inferenceMs.toFixed(0)} ms).`);
 
-        const isUp = raw > 0.5;
-        const conf = ((isUp ? raw : (1.0 - raw)) * 100).toFixed(1);
-        const orientation = isUp ? "UP" : "DOWN";
-        const message = `Model thinks webbing is ${orientation} (${conf}% confidence; raw score: ${raw.toFixed(3)}).`;
+        let message;
+        if (result.legacy) {
+          const isUp = result.raw > 0.5;
+          const confidence = ((isUp ? result.raw : (1.0 - result.raw)) * 100).toFixed(1);
+          message = `Legacy model: webbing is ${isUp ? "UP" : "DOWN"} (${confidence}% confidence).`;
+        } else {
+          const confidence = (result.confidence * 100).toFixed(1);
+          if (result.status === "target") {
+            message = `Correct webbing detected at ${result.angleDeg.toFixed(1)}° (${confidence}% confidence).`;
+          } else if (result.status === "wrong") {
+            message = `Wrong webbing detected (${confidence}% confidence).`;
+          } else {
+            message = `No webbing detected (${confidence}% confidence).`;
+          }
+        }
         setAlignmentStatus(message);
         log(message);
       } catch (err) {
